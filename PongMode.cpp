@@ -7,14 +7,11 @@
 #include <glm/gtc/type_ptr.hpp>
 
 #include <random>
-
+#include <deque>
+	   
 PongMode::PongMode() {
-
-	//set up trail as if ball has been here for 'forever':
-	ball_trail.clear();
-	ball_trail.emplace_back(ball, trail_length);
-	ball_trail.emplace_back(ball, 0.0f);
-
+	// initial setup of game
+	setup();
 	
 	//----- allocate OpenGL resources -----
 	{ //vertex buffer:
@@ -45,6 +42,7 @@ PongMode::PongMode() {
 		);
 		glEnableVertexAttribArray(color_texture_program.Position_vec4);
 		//[Note that it is okay to bind a vec3 input to a vec4 attribute -- the w component will be filled with 1.0 automatically]
+	   
 
 		glVertexAttribPointer(
 			color_texture_program.Color_vec4, //attribute
@@ -104,6 +102,7 @@ PongMode::PongMode() {
 	}
 }
 
+	   
 PongMode::~PongMode() {
 
 	//----- free OpenGL resources -----
@@ -117,156 +116,290 @@ PongMode::~PongMode() {
 	white_tex = 0;
 }
 
+void PongMode::setup() {
+	// Initialize snake position
+	snake_vertices.clear();
+	snake_vertices.emplace_back(glm::vec2(0.0f, 0.0f));
+	snake_vertices.emplace_back(glm::vec2(snake_length, 0.0f));
+
+	snake_velocity = glm::vec2(-1.0f, 0.0f);
+	snake_length = initial_snake_length;
+	length_update_buffer = 0.0f;
+
+	left_paddle = glm::vec2(-court_size.x + 0.5f, 0.0f);
+	right_paddle = glm::vec2(court_size.x - 0.5f, 0.0f);
+
+	// Generate initial green_fruit position
+	static std::mt19937 mt; //mersenne twister pseudo-random number generator
+
+	green_fruit.x = (mt() / float(mt.max()) * court_size.x - court_size.x) * 0.8;
+	green_fruit.y = (mt() / float(mt.max()) * court_size.y - court_size.y) * 0.8;
+
+    red_fruit_exists = false;
+
+	last_collided = false;
+	
+	health = initial_health;
+
+    running = true;
+}
+
+void PongMode::damaged(int damage) {
+	health -= damage;
+	if(health < 0) {
+        running = false;
+	}
+}
+
 bool PongMode::handle_event(SDL_Event const &evt, glm::uvec2 const &window_size) {
 
-	if (evt.type == SDL_MOUSEMOTION) {
-		//convert mouse from window pixels (top-left origin, +y is down) to clip space ([-1,1]x[-1,1], +y is up):
-		glm::vec2 clip_mouse = glm::vec2(
-			(evt.motion.x + 0.5f) / window_size.x * 2.0f - 1.0f,
-			(evt.motion.y + 0.5f) / window_size.y *-2.0f + 1.0f
-		);
-		left_paddle.y = (clip_to_court * glm::vec3(clip_mouse, 1.0f)).y;
-	}
+    if(!running) {
+        if(evt.type == SDL_KEYDOWN) {
+            setup();
+        }
+    } else {
+        if (evt.type == SDL_MOUSEMOTION) {
+            //convert mouse from window pixels (top-left origin, +y is down) to clip space ([-1,1]x[-1,1], +y is up):
+            glm::vec2 clip_mouse = glm::vec2(
+                    (evt.motion.x + 0.5f) / window_size.x * 2.0f - 1.0f,
+                    (evt.motion.y + 0.5f) / window_size.y *-2.0f + 1.0f
+                    );
+            right_paddle.y = (clip_to_court * glm::vec3(clip_mouse, 1.0f)).y;
+        } else if (evt.type == SDL_KEYDOWN && evt.key.keysym.sym == SDLK_w) {
+            w_pressed = true;
+            s_pressed = false;
+        } else if (evt.type == SDL_KEYUP && evt.key.keysym.sym == SDLK_w) {
+            w_pressed = false;
+        } else if (evt.type == SDL_KEYDOWN && evt.key.keysym.sym == SDLK_s) {
+            s_pressed = true;
+            w_pressed = false;
+        } else if (evt.type == SDL_KEYUP && evt.key.keysym.sym == SDLK_s) {
+            s_pressed = false;
+        }
+    }
 
 	return false;
 }
+	   
+
+// Inline helper function
+// not sure why vec.length() always returns 2
+static float inline veclength(glm::vec2 vector) {
+	return pow(vector.x * vector.x + vector.y * vector.y, 0.5);
+}
 
 void PongMode::update(float elapsed) {
+    if(!running) return;
 
 	static std::mt19937 mt; //mersenne twister pseudo-random number generator
 
-	//----- paddle update -----
+    if(w_pressed) {
+        left_paddle.y += 0.2f;
+    } else if(s_pressed) {
+        left_paddle.y -= 0.2f;
+    }
 
-	{ //right player ai:
-		ai_offset_update -= elapsed;
-		if (ai_offset_update < elapsed) {
-			//update again in [0.5,1.0) seconds:
-			ai_offset_update = (mt() / float(mt.max())) * 0.5f + 0.5f;
-			ai_offset = (mt() / float(mt.max())) * 2.5f - 1.25f;
+	left_paddle.y = std::min(left_paddle.y, court_size.y - paddle_size.y);
+	left_paddle.y = std::max(left_paddle.y, -court_size.y + paddle_size.y);
+	right_paddle.y = std::min(right_paddle.y, court_size.y - paddle_size.y);
+	right_paddle.y = std::max(right_paddle.y, -court_size.y + paddle_size.y);
+
+	//----- snake head update -----
+
+	// speed of snake scales proportionally with snake length
+	float speed_multiplier = 2.0f + 0.5f * snake_length;
+
+	//velocity cap, this time for balance reasons
+	speed_multiplier = std::min(speed_multiplier, 7.5f);
+
+	glm::vec2 movement = elapsed * speed_multiplier * snake_velocity;
+	snake_vertices[0] += movement;
+	float move_length = veclength(movement);
+
+	// Check if the length has increased first
+	if(move_length > length_update_buffer) {
+		move_length -= length_update_buffer;
+		length_update_buffer = 0.0f;
+
+		// trim end of snake
+		glm::vec2 end = snake_vertices.back();
+		snake_vertices.pop_back();
+		glm::vec2 penult = snake_vertices.back();
+
+		while(true) {
+			float length = veclength(penult - end);
+
+			// if movement is larger than snake segment, remove it completely
+			if(move_length > length) {
+				move_length -= length;
+				end = snake_vertices.back();
+				snake_vertices.pop_back();
+				penult = snake_vertices.back();;
+			} else {
+				end += (penult - end) * move_length / length;
+				snake_vertices.push_back(end);
+				break;
+			}
 		}
-		if (right_paddle.y < ball.y + ai_offset) {
-			right_paddle.y = std::min(ball.y + ai_offset, right_paddle.y + 2.0f * elapsed);
-		} else {
-			right_paddle.y = std::max(ball.y + ai_offset, right_paddle.y - 2.0f * elapsed);
-		}
+	} else {
+		// can skip trimming snake
+		length_update_buffer -= move_length;
+		move_length = 0.0f;
 	}
-
-	//clamp paddles to court:
-	right_paddle.y = std::max(right_paddle.y, -court_radius.y + paddle_radius.y);
-	right_paddle.y = std::min(right_paddle.y,  court_radius.y - paddle_radius.y);
-
-	left_paddle.y = std::max(left_paddle.y, -court_radius.y + paddle_radius.y);
-	left_paddle.y = std::min(left_paddle.y,  court_radius.y - paddle_radius.y);
-
-	//----- ball update -----
-
-	//speed of ball doubles every four points:
-	float speed_multiplier = 4.0f * std::pow(2.0f, (left_score + right_score) / 4.0f);
-
-	//velocity cap, though (otherwise ball can pass through paddles):
-	speed_multiplier = std::min(speed_multiplier, 10.0f);
-
-	ball += elapsed * speed_multiplier * ball_velocity;
 
 	//---- collision handling ----
 
 	//paddles:
-	auto paddle_vs_ball = [this](glm::vec2 const &paddle) {
+	auto paddle_vs_head = [this](glm::vec2 const &paddle) {
 		//compute area of overlap:
-		glm::vec2 min = glm::max(paddle - paddle_radius, ball - ball_radius);
-		glm::vec2 max = glm::min(paddle + paddle_radius, ball + ball_radius);
+		glm::vec2 min = glm::max(paddle - paddle_size,
+				snake_vertices[0] - snake_size);
+		glm::vec2 max = glm::min(paddle + paddle_size,
+				snake_vertices[0] + snake_size);
 
 		//if no overlap, no collision:
 		if (min.x > max.x || min.y > max.y) return;
 
 		if (max.x - min.x > max.y - min.y) {
 			//wider overlap in x => bounce in y direction:
-			if (ball.y > paddle.y) {
-				ball.y = paddle.y + paddle_radius.y + ball_radius.y;
-				ball_velocity.y = std::abs(ball_velocity.y);
+			if (snake_vertices[0].y > paddle.y) {
+				snake_vertices[0].y = paddle.y + paddle_size.y + snake_size.y;
+				snake_vertices.push_front(glm::vec2(snake_vertices[0]));
+				snake_velocity.y = std::abs(snake_velocity.y);
 			} else {
-				ball.y = paddle.y - paddle_radius.y - ball_radius.y;
-				ball_velocity.y = -std::abs(ball_velocity.y);
+				snake_vertices[0].y = paddle.y - paddle_size.y - snake_size.y;
+				snake_vertices.push_front(glm::vec2(snake_vertices[0]));
+				snake_velocity.y = -std::abs(snake_velocity.y);
 			}
 		} else {
 			//wider overlap in y => bounce in x direction:
-			if (ball.x > paddle.x) {
-				ball.x = paddle.x + paddle_radius.x + ball_radius.x;
-				ball_velocity.x = std::abs(ball_velocity.x);
+			if (snake_vertices[0].x > paddle.x) {
+				snake_vertices[0].x = paddle.x + paddle_size.x + snake_size.x;
+				snake_vertices.push_front(glm::vec2(snake_vertices[0]));
+				snake_velocity.x = std::abs(snake_velocity.x);
 			} else {
-				ball.x = paddle.x - paddle_radius.x - ball_radius.x;
-				ball_velocity.x = -std::abs(ball_velocity.x);
+				snake_vertices[0].x = paddle.x - paddle_size.x - snake_size.x;
+				snake_vertices.push_front(glm::vec2(snake_vertices[0]));
+				snake_velocity.x = -std::abs(snake_velocity.x);
 			}
 			//warp y velocity based on offset from paddle center:
-			float vel = (ball.y - paddle.y) / (paddle_radius.y + ball_radius.y);
-			ball_velocity.y = glm::mix(ball_velocity.y, vel, 0.75f);
+			float vel = (snake_vertices[0].y - paddle.y) / (paddle_size.y + snake_size.y);
+			snake_velocity.y = glm::mix(snake_velocity.y, vel, 0.75f);
 		}
 	};
-	paddle_vs_ball(left_paddle);
-	paddle_vs_ball(right_paddle);
+	paddle_vs_head(left_paddle);
+	paddle_vs_head(right_paddle);
 
 	//court walls:
-	if (ball.y > court_radius.y - ball_radius.y) {
-		ball.y = court_radius.y - ball_radius.y;
-		if (ball_velocity.y > 0.0f) {
-			ball_velocity.y = -ball_velocity.y;
+	if (snake_vertices[0].y > court_size.y - snake_size.y) {
+		snake_vertices[0].y = 2 * (court_size.y - snake_size.y) -
+			snake_vertices[0].y;
+		snake_vertices.push_front(glm::vec2(snake_vertices[0].x,
+					court_size.y - snake_size.y));
+		if (snake_velocity.y > 0.0f) {
+			snake_velocity.y = -snake_velocity.y;
 		}
-	}
-	if (ball.y < -court_radius.y + ball_radius.y) {
-		ball.y = -court_radius.y + ball_radius.y;
-		if (ball_velocity.y < 0.0f) {
-			ball_velocity.y = -ball_velocity.y;
-		}
-	}
-
-	if (ball.x > court_radius.x - ball_radius.x) {
-		ball.x = court_radius.x - ball_radius.x;
-		if (ball_velocity.x > 0.0f) {
-			ball_velocity.x = -ball_velocity.x;
-			left_score += 1;
-		}
-	}
-	if (ball.x < -court_radius.x + ball_radius.x) {
-		ball.x = -court_radius.x + ball_radius.x;
-		if (ball_velocity.x < 0.0f) {
-			ball_velocity.x = -ball_velocity.x;
-			right_score += 1;
+	} else if (snake_vertices[0].y < -court_size.y + snake_size.y) {
+		snake_vertices[0].y = 2 * (-court_size.y + snake_size.y) -
+			snake_vertices[0].y;
+		snake_vertices.push_front(glm::vec2(snake_vertices[0].x,
+					-court_size.y + snake_size.y));
+		if (snake_velocity.y < 0.0f) {
+			snake_velocity.y = -snake_velocity.y;
 		}
 	}
 
-	//----- rainbow trails -----
+	if (snake_vertices[0].x > court_size.x - snake_size.x) {
+		damaged(paddle_miss_damage);
 
-	//age up all locations in ball trail:
-	for (auto &t : ball_trail) {
-		t.z += elapsed;
-	}
-	//store fresh location at back of ball trail:
-	ball_trail.emplace_back(ball, 0.0f);
+		snake_vertices[0].x = 2 * (court_size.x - snake_size.x) -
+			snake_vertices[0].x;
+		snake_vertices.push_front(glm::vec2(court_size.x - snake_size.x,
+					snake_vertices[0].y));
+		if (snake_velocity.x > 0.0f) {
+			snake_velocity.x = -snake_velocity.x;
+		}
+	} else if (snake_vertices[0].x < -court_size.x + snake_size.x) {
+		damaged(paddle_miss_damage);
 
-	//trim any too-old locations from back of trail:
-	//NOTE: since trail drawing interpolates between points, only removes back element if second-to-back element is too old:
-	while (ball_trail.size() >= 2 && ball_trail[1].z > trail_length) {
-		ball_trail.pop_front();
+		snake_vertices[0].x = 2 * (-court_size.x + snake_size.x) -
+			snake_vertices[0].x;
+		snake_vertices.push_front(glm::vec2(-court_size.x + snake_size.x,
+					snake_vertices[0].y));
+		if (snake_velocity.x < 0.0f) {
+			snake_velocity.x = -snake_velocity.x;
+		}
 	}
+
+	// green fruit
+	if(abs(snake_vertices[0].x - green_fruit.x) < snake_radius + fruit_radius &&
+			abs(snake_vertices[0].y - green_fruit.y) < snake_radius + fruit_radius) {
+		// regenerate green_fruit someplace else
+		green_fruit.x = (mt() / float(mt.max()) * court_size.x - court_size.x) * 0.8;
+		green_fruit.y = (mt() / float(mt.max()) * court_size.y - court_size.y) * 0.8;
+		
+		// increase snake length
+		length_update_buffer += green_fruit_length_increase;
+		snake_length += green_fruit_length_increase;
+	}
+
+    // red fruit
+    if(red_fruit_exists) {
+        if(abs(snake_vertices[0].x - red_fruit.x) < snake_radius + fruit_radius &&
+                abs(snake_vertices[0].y - red_fruit.y) < snake_radius + fruit_radius) {
+            // heal
+            damaged(-red_fruit_heal);
+
+            red_fruit_exists = false;
+        }
+    } else {
+        // otherwise spawn a red fruit with a chance
+        if(mt() / float(mt.max()) < red_fruit_chance) {
+            red_fruit.x = (mt() / float(mt.max()) * court_size.x - court_size.x) * 0.8;
+            red_fruit.y = (mt() / float(mt.max()) * court_size.y - court_size.y) * 0.8;
+            red_fruit_exists = true;
+        }
+    }
+
+	// snake head with body
+	// we ignore the second snake segment for balance, so we can skip if there
+	// are less than 4 vertices
+	if(snake_vertices.size() > 3) {
+        bool tick_collided = false;
+
+		auto it = snake_vertices.begin();
+		glm::vec2 head = *it;
+		it += 2; // skip second segment
+
+		glm::vec2 cur_vertex = *it++;
+		glm::vec2 prev_vertex;
+		while(it != snake_vertices.end()) {
+				prev_vertex = cur_vertex;
+				cur_vertex = *it++;
+
+			// collision if distance from point to line is less than diameter
+			float d = abs((cur_vertex.y - prev_vertex.y) * head.x -
+					(cur_vertex.x - prev_vertex.x) * head.y +
+					cur_vertex.x * prev_vertex.y -
+					cur_vertex.y * prev_vertex.x) /
+				veclength(cur_vertex - prev_vertex);
+
+			if(d < 2 * snake_radius) {
+                if(!last_collided) {
+                    damaged(collision_damage);
+                }
+                tick_collided = true;
+				break;
+			}
+		}
+
+        last_collided = tick_collided;
+	} else {
+        last_collided = false;
+    }
 }
 
 void PongMode::draw(glm::uvec2 const &drawable_size) {
-	//some nice colors from the course web page:
-	#define HEX_TO_U8VEC4( HX ) (glm::u8vec4( (HX >> 24) & 0xff, (HX >> 16) & 0xff, (HX >> 8) & 0xff, (HX) & 0xff ))
-	const glm::u8vec4 bg_color = HEX_TO_U8VEC4(0x171714ff);
-	const glm::u8vec4 fg_color = HEX_TO_U8VEC4(0xd1bb54ff);
-	const glm::u8vec4 shadow_color = HEX_TO_U8VEC4(0x604d29ff);
-	const std::vector< glm::u8vec4 > rainbow_colors = {
-		HEX_TO_U8VEC4(0x604d29ff), HEX_TO_U8VEC4(0x624f29fc), HEX_TO_U8VEC4(0x69542df2),
-		HEX_TO_U8VEC4(0x6a552df1), HEX_TO_U8VEC4(0x6b562ef0), HEX_TO_U8VEC4(0x6b562ef0),
-		HEX_TO_U8VEC4(0x6d572eed), HEX_TO_U8VEC4(0x6f592feb), HEX_TO_U8VEC4(0x725b31e7),
-		HEX_TO_U8VEC4(0x745d31e3), HEX_TO_U8VEC4(0x755e32e0), HEX_TO_U8VEC4(0x765f33de),
-		HEX_TO_U8VEC4(0x7a6234d8), HEX_TO_U8VEC4(0x826838ca), HEX_TO_U8VEC4(0x977840a4),
-		HEX_TO_U8VEC4(0x96773fa5), HEX_TO_U8VEC4(0xa07f4493), HEX_TO_U8VEC4(0xa1814590),
-		HEX_TO_U8VEC4(0x9e7e4496), HEX_TO_U8VEC4(0xa6844887), HEX_TO_U8VEC4(0xa9864884),
-		HEX_TO_U8VEC4(0xad8a4a7c),
-	};
-	#undef HEX_TO_U8VEC4
 
 	//other useful drawing constants:
 	const float wall_radius = 0.05f;
@@ -278,88 +411,124 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 	//vertices will be accumulated into this list and then uploaded+drawn at the end of this function:
 	std::vector< Vertex > vertices;
 
-	//inline helper function for rectangle drawing:
-	auto draw_rectangle = [&vertices](glm::vec2 const &center, glm::vec2 const &radius, glm::u8vec4 const &color) {
-		//draw rectangle as two CCW-oriented triangles:
-		vertices.emplace_back(glm::vec3(center.x-radius.x, center.y-radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
-		vertices.emplace_back(glm::vec3(center.x+radius.x, center.y-radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
-		vertices.emplace_back(glm::vec3(center.x+radius.x, center.y+radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+	// List of circles to be drawn
+	std::vector<std::vector<Vertex>> circles;
 
-		vertices.emplace_back(glm::vec3(center.x-radius.x, center.y-radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
-		vertices.emplace_back(glm::vec3(center.x+radius.x, center.y+radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
-		vertices.emplace_back(glm::vec3(center.x-radius.x, center.y+radius.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+	// inline helper function for rectangle drawing:
+	auto draw_rectangle = [&vertices](glm::vec2 const &center,
+			glm::vec2 const &size, glm::u8vec4 const &color) {
+		// draw rectangle as two CCW-oriented triangles:
+		vertices.emplace_back(glm::vec3(center.x-size.x, center.y-size.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+		vertices.emplace_back(glm::vec3(center.x+size.x, center.y-size.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+		vertices.emplace_back(glm::vec3(center.x+size.x, center.y+size.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+
+		vertices.emplace_back(glm::vec3(center.x-size.x, center.y-size.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+		vertices.emplace_back(glm::vec3(center.x+size.x, center.y+size.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+		vertices.emplace_back(glm::vec3(center.x-size.x, center.y+size.y, 0.0f), color, glm::vec2(0.5f, 0.5f));
+	};
+
+	// inline helper function for rectangles not aligned with axis
+	// requires vertex1 to be on top-left or bottom-right of vertex 2
+	auto draw_unaligned_rectangle = [&vertices](glm::vec2 const &vertex1,
+			glm::vec2 const &vertex2, glm::vec2 const &size,
+			glm::u8vec4 const &color) {
+		float length = distance(vertex1, vertex2);
+		float x_ratio = abs(vertex1.x - vertex2.x) / length;
+		float y_ratio = abs(vertex1.y - vertex2.y) / length;
+
+		if(vertex1.y == vertex2.y ||
+			(vertex1.x - vertex2.x) / (vertex1.y - vertex2.y) > 0) {
+			const glm::vec2 &botleft = vertex1.x - vertex2.x < 0 ? vertex1 :
+				vertex2;
+			const glm::vec2 &topright = vertex1.x - vertex2.x < 0 ? vertex2 :
+				vertex1;
+
+			vertices.emplace_back(glm::vec3(botleft.x - size.x * x_ratio + size.y * y_ratio, botleft.y - size.x * y_ratio - size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(topright.x + size.x * x_ratio + size.y * y_ratio, topright.y + size.x * y_ratio - size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(topright.x + size.x * x_ratio - size.y * y_ratio, topright.y + size.x * y_ratio + size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+
+			vertices.emplace_back(glm::vec3(botleft.x - size.x * x_ratio + size.y * y_ratio, botleft.y - size.x * y_ratio - size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(topright.x + size.x * x_ratio - size.y * y_ratio, topright.y + size.x * y_ratio + size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(botleft.x - size.x * x_ratio - size.y * y_ratio, botleft.y - size.x * y_ratio + size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+		} else {
+			const glm::vec2 &topleft = vertex1.x - vertex2.x < 0 ? vertex1 :
+				vertex2;
+			const glm::vec2 &botright = vertex1.x - vertex2.x < 0 ? vertex2 :
+				vertex1;
+
+			vertices.emplace_back(glm::vec3(topleft.x - size.x * x_ratio + size.y * y_ratio, topleft.y + size.x * y_ratio + size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(botright.x + size.x * x_ratio + size.y * y_ratio, botright.y - size.x * y_ratio + size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(botright.x + size.x * x_ratio - size.y * y_ratio, botright.y - size.x * y_ratio - size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+
+			vertices.emplace_back(glm::vec3(topleft.x - size.x * x_ratio + size.y * y_ratio, topleft.y + size.x * y_ratio + size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(botright.x + size.x * x_ratio - size.y * y_ratio, botright.y - size.x * y_ratio - size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+			vertices.emplace_back(glm::vec3(topleft.x - size.x * x_ratio - size.y * y_ratio, topleft.y + size.x * y_ratio - size.y * x_ratio, 0.0f), color, glm::vec2(0.5f, 0.5f)); 
+		}
 	};
 
 	//shadows for everything (except the trail):
 
 	glm::vec2 s = glm::vec2(0.0f,-shadow_offset);
 
-	draw_rectangle(glm::vec2(-court_radius.x-wall_radius, 0.0f)+s, glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), shadow_color);
-	draw_rectangle(glm::vec2( court_radius.x+wall_radius, 0.0f)+s, glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), shadow_color);
-	draw_rectangle(glm::vec2( 0.0f,-court_radius.y-wall_radius)+s, glm::vec2(court_radius.x, wall_radius), shadow_color);
-	draw_rectangle(glm::vec2( 0.0f, court_radius.y+wall_radius)+s, glm::vec2(court_radius.x, wall_radius), shadow_color);
-	draw_rectangle(left_paddle+s, paddle_radius, shadow_color);
-	draw_rectangle(right_paddle+s, paddle_radius, shadow_color);
-	draw_rectangle(ball+s, ball_radius, shadow_color);
-
-	//ball's trail:
-	if (ball_trail.size() >= 2) {
-		//start ti at second element so there is always something before it to interpolate from:
-		std::deque< glm::vec3 >::iterator ti = ball_trail.begin() + 1;
-		//draw trail from oldest-to-newest:
-		for (uint32_t i = uint32_t(rainbow_colors.size())-1; i < rainbow_colors.size(); --i) {
-			//time at which to draw the trail element:
-			float t = (i + 1) / float(rainbow_colors.size()) * trail_length;
-			//advance ti until 'just before' t:
-			while (ti != ball_trail.end() && ti->z > t) ++ti;
-			//if we ran out of tail, stop drawing:
-			if (ti == ball_trail.end()) break;
-			//interpolate between previous and current trail point to the correct time:
-			glm::vec3 a = *(ti-1);
-			glm::vec3 b = *(ti);
-			glm::vec2 at = (t - a.z) / (b.z - a.z) * (glm::vec2(b) - glm::vec2(a)) + glm::vec2(a);
-			//draw:
-			draw_rectangle(at, ball_radius, rainbow_colors[i]);
-		}
-	}
+	draw_rectangle(glm::vec2(-court_size.x-wall_radius, 0.0f)+s, glm::vec2(wall_radius, court_size.y + 2.0f * wall_radius), shadow_color);
+	draw_rectangle(glm::vec2( court_size.x+wall_radius, 0.0f)+s, glm::vec2(wall_radius, court_size.y + 2.0f * wall_radius), shadow_color);
+	draw_rectangle(glm::vec2( 0.0f,-court_size.y-wall_radius)+s, glm::vec2(court_size.x, wall_radius), shadow_color);
+	draw_rectangle(glm::vec2( 0.0f, court_size.y+wall_radius)+s, glm::vec2(court_size.x, wall_radius), shadow_color);
+	draw_rectangle(left_paddle+s, paddle_size, shadow_color);
+	draw_rectangle(right_paddle+s, paddle_size, shadow_color);
+	//TODO shadow for snake?
+	//draw_rectangle(ball+s, snake_size, shadow_color);
 
 	//solid objects:
 
+	// snake body
+	auto it = snake_vertices.begin();
+	glm::vec2 prev_vertex = *it++;
+	while(it != snake_vertices.end()) {
+		glm::vec2 cur_vertex = *it++;
+		draw_unaligned_rectangle(cur_vertex, prev_vertex, snake_size,
+                snake_color);
+		prev_vertex = cur_vertex;
+	}
+
 	//walls:
-	draw_rectangle(glm::vec2(-court_radius.x-wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
-	draw_rectangle(glm::vec2( court_radius.x+wall_radius, 0.0f), glm::vec2(wall_radius, court_radius.y + 2.0f * wall_radius), fg_color);
-	draw_rectangle(glm::vec2( 0.0f,-court_radius.y-wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
-	draw_rectangle(glm::vec2( 0.0f, court_radius.y+wall_radius), glm::vec2(court_radius.x, wall_radius), fg_color);
+	draw_rectangle(glm::vec2(-court_size.x-wall_radius, 0.0f), glm::vec2(wall_radius, court_size.y + 2.0f * wall_radius), fg_color);
+	draw_rectangle(glm::vec2( court_size.x+wall_radius, 0.0f), glm::vec2(wall_radius, court_size.y + 2.0f * wall_radius), fg_color);
+	draw_rectangle(glm::vec2( 0.0f,-court_size.y-wall_radius), glm::vec2(court_size.x, wall_radius), fg_color);
+	draw_rectangle(glm::vec2( 0.0f, court_size.y+wall_radius), glm::vec2(court_size.x, wall_radius), fg_color);
 
 	//paddles:
-	draw_rectangle(left_paddle, paddle_radius, fg_color);
-	draw_rectangle(right_paddle, paddle_radius, fg_color);
-	
+	draw_rectangle(left_paddle, paddle_size, paddle_color);
+	draw_rectangle(right_paddle, paddle_size, paddle_color);
 
-	//ball:
-	draw_rectangle(ball, ball_radius, fg_color);
+	// green fruit
+	draw_rectangle(green_fruit, fruit_size, green_fruit_color);
 
-	//scores:
-	glm::vec2 score_radius = glm::vec2(0.1f, 0.1f);
-	for (uint32_t i = 0; i < left_score; ++i) {
-		draw_rectangle(glm::vec2( -court_radius.x + (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
-	}
-	for (uint32_t i = 0; i < right_score; ++i) {
-		draw_rectangle(glm::vec2( court_radius.x - (2.0f + 3.0f * i) * score_radius.x, court_radius.y + 2.0f * wall_radius + 2.0f * score_radius.y), score_radius, fg_color);
-	}
+    // red fruit
+    if(red_fruit_exists) {
+        draw_rectangle(red_fruit, fruit_size, red_fruit_color);
+    }
 
-
+    // hearts at top of screen
+    for(int i = 0; i < health; i++) {
+        glm::vec2 pos = glm::vec2(-court_size.x + 0.5f + 1.0f * i,
+                court_size.y + 0.3f + 2.0f * wall_radius);
+        glm::vec2 offset1 = glm::vec2(-0.2f, 0.2f);
+        glm::vec2 offset2 = glm::vec2(0.2f, 0.2f);
+        draw_unaligned_rectangle(pos + offset1, pos, glm::vec2(0.2f, 0.2f), life_color);
+        draw_unaligned_rectangle(pos + offset2, pos, glm::vec2(0.2f, 0.2f), life_color);
+    }
 
 	//------ compute court-to-window transform ------
 
 	//compute area that should be visible:
 	glm::vec2 scene_min = glm::vec2(
-		-court_radius.x - 2.0f * wall_radius - padding,
-		-court_radius.y - 2.0f * wall_radius - padding
+		-court_size.x - 2.0f * wall_radius - padding,
+		-court_size.y - 2.0f * wall_radius - padding
 	);
 	glm::vec2 scene_max = glm::vec2(
-		court_radius.x + 2.0f * wall_radius + padding,
-		court_radius.y + 2.0f * wall_radius + 3.0f * score_radius.y + padding
+		court_size.x + 2.0f * wall_radius + padding,
+		court_size.y + 2.0f * wall_radius + 3.0f + padding
 	);
 
 	//compute window aspect ratio:
@@ -432,7 +601,7 @@ void PongMode::draw(glm::uvec2 const &drawable_size) {
 
 	//reset current program to none:
 	glUseProgram(0);
-	
+
 
 	GL_ERRORS(); //PARANOIA: print errors just in case we did something wrong.
 

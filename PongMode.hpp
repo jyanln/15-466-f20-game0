@@ -21,28 +21,84 @@ struct PongMode : Mode {
 	virtual void update(float elapsed) override;
 	virtual void draw(glm::uvec2 const &drawable_size) override;
 
+	void setup();
+	void damaged(int damage);
+
+	// game constants
+	static constexpr glm::vec2 court_size = glm::vec2(9.6f, 6.0f);
+	static constexpr glm::vec2 paddle_size = glm::vec2(0.2f, 1.0f);
+
+	static constexpr float snake_radius = 0.2f;
+	static constexpr glm::vec2 snake_size = glm::vec2(snake_radius,
+			snake_radius);
+
+	static constexpr float fruit_radius = 0.3f;
+	static constexpr glm::vec2 fruit_size = glm::vec2(fruit_radius,
+			fruit_radius);
+	static constexpr float green_fruit_length_increase = 0.5f;
+
+	static constexpr int initial_health = 5;
+	static constexpr int collision_damage = 2;
+	static constexpr int paddle_miss_damage = 1;
+
+    static constexpr float red_fruit_chance = 0.101;
+	static constexpr int red_fruit_heal = 1;
+
+    static constexpr float initial_snake_length = 10.5f;
+
 	//----- game state -----
+    bool running;
 
-	glm::vec2 court_radius = glm::vec2(7.0f, 5.0f);
-	glm::vec2 paddle_radius = glm::vec2(0.2f, 1.0f);
-	glm::vec2 ball_radius = glm::vec2(0.2f, 0.2f);
+	glm::vec2 left_paddle;
+	glm::vec2 right_paddle;
 
-	glm::vec2 left_paddle = glm::vec2(-court_radius.x + 0.5f, 0.0f);
-	glm::vec2 right_paddle = glm::vec2( court_radius.x - 0.5f, 0.0f);
+	glm::vec2 snake_velocity = glm::vec2(-1.0f, 0.0f);
 
-	glm::vec2 ball = glm::vec2(0.0f, 0.0f);
-	glm::vec2 ball_velocity = glm::vec2(-1.0f, 0.0f);
+	float snake_length = initial_snake_length;
+	std::deque<glm::vec2> snake_vertices;
 
-	uint32_t left_score = 0;
-	uint32_t right_score = 0;
+	glm::vec2 green_fruit;
+    bool red_fruit_exists;
+	glm::vec2 red_fruit;
 
-	float ai_offset = 0.0f;
-	float ai_offset_update = 0.0f;
+	float length_update_buffer = 0.0f;
 
-	//----- pretty rainbow trails -----
+	// flag to prevent multiple collisions along the same segment
+	bool last_collided;
 
-	float trail_length = 1.3f;
-	std::deque< glm::vec3 > ball_trail; //stores (x,y,age), oldest elements first
+	int health;
+
+    // keyboard flags
+    bool w_pressed = false;
+    bool s_pressed = false;
+
+	//some nice colors from the course web page:
+	#define HEX_TO_U8VEC4( HX ) (glm::u8vec4( (HX >> 24) & 0xff, (HX >> 16) & 0xff, (HX >> 8) & 0xff, (HX) & 0xff ))
+	const glm::u8vec4 bg_color = HEX_TO_U8VEC4(0xb4bfb0ff);
+	const glm::u8vec4 fg_color = HEX_TO_U8VEC4(0x2c1320ff);
+
+	const glm::u8vec4 snake_color = HEX_TO_U8VEC4(0x6f9283ff);
+
+    //TODO
+	const glm::u8vec4 green_fruit_color = HEX_TO_U8VEC4(0x188b2dff);
+	const glm::u8vec4 red_fruit_color = HEX_TO_U8VEC4(0xc54630ff);
+
+	const glm::u8vec4 life_color = HEX_TO_U8VEC4(0xc54630ff);
+
+	const glm::u8vec4 paddle_color = HEX_TO_U8VEC4(0x2c1320ff);
+
+	const glm::u8vec4 shadow_color = HEX_TO_U8VEC4(0x604d29ff);
+	const std::vector< glm::u8vec4 > rainbow_colors = {
+		HEX_TO_U8VEC4(0x604d29ff), HEX_TO_U8VEC4(0x624f29fc), HEX_TO_U8VEC4(0x69542df2),
+		HEX_TO_U8VEC4(0x6a552df1), HEX_TO_U8VEC4(0x6b562ef0), HEX_TO_U8VEC4(0x6b562ef0),
+		HEX_TO_U8VEC4(0x6d572eed), HEX_TO_U8VEC4(0x6f592feb), HEX_TO_U8VEC4(0x725b31e7),
+		HEX_TO_U8VEC4(0x745d31e3), HEX_TO_U8VEC4(0x755e32e0), HEX_TO_U8VEC4(0x765f33de),
+		HEX_TO_U8VEC4(0x7a6234d8), HEX_TO_U8VEC4(0x826838ca), HEX_TO_U8VEC4(0x977840a4),
+		HEX_TO_U8VEC4(0x96773fa5), HEX_TO_U8VEC4(0xa07f4493), HEX_TO_U8VEC4(0xa1814590),
+		HEX_TO_U8VEC4(0x9e7e4496), HEX_TO_U8VEC4(0xa6844887), HEX_TO_U8VEC4(0xa9864884),
+		HEX_TO_U8VEC4(0xad8a4a7c),
+	};
+	#undef HEX_TO_U8VEC4
 
 	//----- opengl assets / helpers ------
 
